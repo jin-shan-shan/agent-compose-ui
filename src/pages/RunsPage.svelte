@@ -2613,7 +2613,7 @@
       if (index < 0) {
         index = messages.findIndex((message) => message.role === 'agent' && message.running);
       }
-      if (index >= 0 && messages[index].role === 'agent') {
+      if (index >= 0 && messages[index].role === 'agent' && messages[index].running) {
         applied = true;
         messages[index] = { ...messages[index], content: stripAgentResultPayload(`${messages[index].content || ''}${chunk}`) };
       }
@@ -2726,9 +2726,11 @@
     const pending = pendingCellChunks.get(message.id);
     if (!pending) return message;
     pendingCellChunks.delete(message.id);
+    const existing = agentMessageContent(message, message.content || '');
+    if (existing && existing !== '-' && (existing.includes(pending) || pending.includes(existing))) return message;
     return {
       ...message,
-      content: agentMessageContent(message, `${message.content || ''}${pending}`),
+      content: agentMessageContent(message, `${existing}${pending}`),
     };
   }
 
@@ -3836,6 +3838,7 @@
     stopWatching();
     if (document.visibilityState === 'hidden') return;
     if (run.type !== 'work_session') return;
+    if (run.rawStatus !== 'RUNNING') return;
     const controller = new AbortController();
     watchAbort = controller;
     void watchRunLoop(run.id, controller);
@@ -3909,7 +3912,7 @@
     function appendAgentChunkToMessages(messages: ProductRun['messages'], cellId: string, chunk: string): boolean {
       let index = cellId ? messages.findIndex((message) => message.id === cellId) : -1;
       if (index < 0) index = messages.findIndex((message) => message.role === 'agent' && message.running);
-      if (index >= 0 && messages[index].role === 'agent') {
+      if (index >= 0 && messages[index].role === 'agent' && messages[index].running) {
         messages[index] = { ...messages[index], content: stripAgentResultPayload(`${messages[index].content || ''}${chunk}`) };
         return true;
       }
