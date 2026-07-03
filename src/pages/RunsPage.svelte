@@ -32,7 +32,7 @@
   type TerminalActionParams = { id?: string; text: string; running: boolean };
   type RunView = 'run' | 'agent' | 'task' | 'agent_task';
   type GroupTab = 'runs' | 'timeline' | 'artifacts' | 'automation';
-  type WorkbenchMode = 'chat' | 'tasks' | 'timeline';
+  type WorkbenchMode = 'chat' | 'tasks';
   type TimelineFilter = 'all' | 'manual' | 'task' | 'io' | 'input' | 'output' | 'error' | 'artifact' | 'system';
   type ConversationTaskKind = 'overview' | 'manual_conversation' | 'automation_task';
   type AgentStatusFilter = 'all' | 'running' | 'failed' | 'active' | 'empty';
@@ -40,6 +40,9 @@
   type RunSourceFilter = 'all' | 'manual' | 'task';
   type TimeFilter = 'all' | 'today' | '7d' | '30d';
   type AuxiliaryPanelKind = 'none' | 'run' | 'task' | 'artifact' | 'system';
+  type ChatTimelineItem =
+    | { kind: 'message'; message: ProductRun['messages'][number] }
+    | { kind: 'event'; event: ProductRun['events'][number] };
   type AgentObservation = {
     key: string;
     agentId: string;
@@ -121,6 +124,9 @@
     systemCount: number;
     nodes: GroupTimelineItem[];
   };
+  type RunTimelineNode =
+    | { kind: 'item'; item: GroupTimelineItem }
+    | { kind: 'session_card'; sessionId: string; linkedAt: string; summary: string; status: string; messageCount: number };
   type TimelineRunCard = {
     id: string;
     run: ProductRun;
@@ -165,6 +171,7 @@
   let workbenchMode: WorkbenchMode = 'chat';
   let selectedConversationId = '';
   let selectedTaskId = '';
+  let lastAutoTaskAgentId = '';
   let timelineQuery = '';
   let timelineTimeRange: TimeFilter = 'all';
   let timelineStatus = 'all';
@@ -193,6 +200,8 @@
   let detailLoading = false;
   let groupDetailLoading = false;
   let sessionAction: { runId: string; type: 'stop' | 'resume' } | null = null;
+  let expandedRunTimeline: RunTimelineNode[] = [];
+  let expandedRunTimelineLoading = false;
   let automationActionRunId = '';
   let runAgent: AgentDefinition | null = null;
   let runWorkspaceMode: 'empty' | 'file' | 'git' = 'empty';
@@ -210,6 +219,9 @@
   let pendingCellChunks = new Map<string, string>();
   let messageScroll: HTMLDivElement | null = null;
   let messageScrollFrame = 0;
+  let workbenchMainEl: HTMLElement | null = null;
+  let timelineListScrollEl: HTMLElement | null = null;
+  let taskListScrollTop = 0;
   let terminalVisibleIds = new Set<string>();
   const terminalHeights = new Map<string, number>();
   const terminalNodeIds = new Map<Element, string>();
@@ -244,8 +256,15 @@
   $: selectedConversationTaskItem = conversationTaskItems.find((item) => item.key === selectedContextKey) || conversationTaskItems[0] || null;
   $: manualConversationItems = conversationTaskItems.filter((item) => item.kind === 'manual_conversation');
   $: automationTaskItems = conversationTaskItems.filter((item) => item.kind === 'automation_task');
+
+  // Auto-select first automation task when switching to tasks mode with a new agent
+  $: if (workbenchMode === 'tasks' && !selectedTaskId && automationTaskItems.length > 0 && selectedAgentId !== lastAutoTaskAgentId) {
+    lastAutoTaskAgentId = selectedAgentId;
+    void tick().then(() => selectTaskForTimeline(automationTaskItems[0]));
+  }
   $: selectedRun = selectedRunId ? currentAgentBaseRuns.find((run) => run.id === selectedRunId) || selectedAgentObservation?.runs.find((run) => run.id === selectedRunId) || null : null;
   $: selectedChatRun = resolveSelectedChatRun(workbenchMode, selectedConversationId, selectedRunId, selectedAgentObservation, currentAgentRuns, currentAgentBaseRuns);
+  $: chatTimelineItems = buildChatTimeline(selectedChatRun ? runMessages(selectedChatRun) : [], selectedChatRun?.events || []);
   $: timelineCriteria = {
     taskId: selectedTaskId,
     timeRange: timelineTimeRange,
@@ -264,6 +283,7 @@
   $: taskModeRunCards = filterTimelineRunCards(baseTimelineCards, { ...timelineCriteria, filter: 'task' });
   $: visibleTaskModeRunCards = taskModeRunCards.slice(0, timelineVisibleLimit);
   $: taskModeDateGroups = groupTimelineRunCardsByDate(visibleTaskModeRunCards);
+  $: selectedTaskCard = selectedRunId ? taskModeRunCards.find(c => c.id === selectedRunId) : null;
   $: selectedAutomationTaskItem = selectedTaskId ? automationTaskItems.find((item) => item.taskId === selectedTaskId) || null : null;
   $: auxiliaryRun = workbenchMode === 'chat' ? selectedChatRun : selectedRun;
   $: currentTimelineItems = selectedConversationTaskItem ? buildConversationItemTimeline(selectedConversationTaskItem) : [];
@@ -351,10 +371,10 @@
   }
 
   function workbenchModeFromValue(value: string | null): WorkbenchMode {
-    if (value === 'chat' || value === 'tasks' || value === 'timeline') {
+    if (value === 'chat' || value === 'tasks') {
       return value;
     }
-    if (value === 'artifacts') return 'timeline';
+    if (value === 'artifacts' || value === 'timeline') return 'tasks';
     return 'chat';
   }
 
@@ -1065,20 +1085,6 @@
   function runEndedAt(run: ProductRun): string {
     if (['等待中', '运行中', '停止中...', '恢复中...'].includes(run.status)) return '';
     return run.completedAt;
-  }
-
-  function timelineCardTypeText(card: TimelineRunCard): string {
-    return card.kind === 'manual' ? '手动对话' : '任务触发运行';
-  }
-
-  function timelineCardTimeRange(card: TimelineRunCard): string {
-    const start = timelineTime(card.startedAt);
-    const end = card.endedAt && card.endedAt !== card.startedAt ? timelineTime(card.endedAt) : '';
-    return end ? `${start} - ${end}` : `${start} - 进行中`;
-  }
-
-  function timelineCardSummaryLine(card: TimelineRunCard): string {
-    return `${timelineCardTypeText(card)}${card.status}  #${shortRunId(card.id)}`;
   }
 
   function detailRunForCard(card: TimelineRunCard): ProductRun {
@@ -2098,10 +2104,22 @@
       activeDetailTab = 'result';
       auxiliaryPanelKind = 'none';
       sidePanelOpen = false;
+      expandedRunTimeline = [];
       updateURL();
+      void tick().then(() => {
+        if (timelineListScrollEl) timelineListScrollEl.scrollTop = taskListScrollTop;
+      });
       return;
     }
-    openRunFromTimeline(run);
+    taskListScrollTop = timelineListScrollEl?.scrollTop ?? 0;
+    selectedRunId = run.id;
+    selectedContextKey = run.automationId ? `task:${run.automationId}` : `manual:${run.id}`;
+    taskFilter = selectedTaskId;
+    activeDetailTab = 'result';
+    auxiliaryPanelKind = 'none';
+    sidePanelOpen = false;
+    updateURL();
+    void loadRunTimelineDetail(run);
   }
 
   function toggleActivityDetail(run: ProductRun): void {
@@ -2401,7 +2419,25 @@
       .map((prefix) => result.lastIndexOf(prefix))
       .filter((index) => index >= 0);
     const index = indexes.length > 0 ? Math.min(...indexes) : -1;
-    return index >= 0 ? result.slice(0, index) : result;
+    if (index < 0) return result;
+    const jsonStart = result.indexOf('{', index);
+    if (jsonStart < 0) return result.slice(0, index);
+    try {
+      const jsonEnd = result.lastIndexOf('}') + 1;
+      const payload = JSON.parse(result.slice(jsonStart, jsonEnd));
+      const extracted = payload.finalText || payload.final_text || payload.transcript || payload.stderr || '';
+      const before = result.slice(0, index);
+      if (!extracted) return before || result;
+      // During streaming the raw output before the marker is often the same
+      // text that ends up in the JSON finalText field — don't duplicate.
+      const trimmedBefore = before.trim();
+      const trimmedExtracted = extracted.trim();
+      if (trimmedBefore && (trimmedBefore === trimmedExtracted || trimmedBefore.includes(trimmedExtracted))) return trimmedBefore;
+      if (trimmedExtracted.includes(trimmedBefore)) return trimmedExtracted;
+      return (trimmedBefore ? trimmedBefore + '\n' : '') + trimmedExtracted;
+    } catch {
+      return result.slice(0, index);
+    }
   }
 
   function sanitizeRunText(value: string, maxLength = 260): string {
@@ -2826,9 +2862,13 @@
   }
 
   function formatRole(role: string): string {
-    if (role === 'user') return '用户';
-    if (role === 'agent') return '智能体';
-    return '系统';
+    if (role === 'user') return 'User';
+    if (role === 'agent') return 'Agent';
+    return 'System';
+  }
+
+  function formatEventType(type: string): string {
+    return type;
   }
 
   function messageStatus(message: ProductRun['messages'][number]): string {
@@ -2855,6 +2895,69 @@
 
   function messageSummaryText(message: ProductRun['messages'][number]): string {
     return agentMessageContent(message, message.content || message.source || '');
+  }
+
+  function buildChatTimeline(messages: ProductRun['messages'], events: ProductRun['events']): ChatTimelineItem[] {
+    const items: ChatTimelineItem[] = [];
+
+    // Group messages into turns (user+agent pairs)
+    const turns: ProductRun['messages'][] = [];
+    let current: ProductRun['messages'] = [];
+    for (const msg of messages) {
+      if (msg.role === 'user' && current.length > 0) {
+        turns.push(current);
+        current = [];
+      }
+      current.push(msg);
+    }
+    if (current.length > 0) turns.push(current);
+
+    // Filter out events that duplicate message content
+    const filteredEvents = events.filter((e) => e.type !== 'agent.user' && e.type !== 'agent.assistant');
+
+    // Interleave turns and events by time
+    const turnItems: ChatTimelineItem[] = turns.map((turn) => {
+      const firstMsg = turn[0];
+      const agentMsg = turn.find((m) => m.role === 'agent') || turn[turn.length - 1];
+      return {
+        kind: 'message' as const,
+        message: agentMsg.role === 'agent' ? agentMsg : firstMsg,
+        _all: turn,
+      } as ChatTimelineItem & { _all: typeof turn };
+    });
+
+    // Sort all by timestamp: use earliest message time for turns, event.createdAt for events
+    const eventItems: Array<ChatTimelineItem & { _ts: number }> = filteredEvents.map((e) => ({
+      kind: 'event' as const,
+      event: e,
+      _ts: new Date(e.createdAt).getTime(),
+    }));
+
+    const paired: Array<ChatTimelineItem & { _ts: number }> = turnItems.map((t) => {
+      const all = (t as any)._all as ProductRun['messages'];
+      const times = all.map((m) => new Date(m.at).getTime()).filter((n) => !Number.isNaN(n));
+      return { ...t, _ts: times.length > 0 ? Math.min(...times) : 0 };
+    });
+
+    const sorted = [...paired, ...eventItems].sort((a, b) => a._ts - b._ts);
+
+    // Flatten turns back to individual messages
+    const result: ChatTimelineItem[] = [];
+    for (const item of sorted) {
+      if (item.kind === 'message') {
+        const all = (item as any)._all as ProductRun['messages'] | undefined;
+        if (all) {
+          for (const m of all) {
+            result.push({ kind: 'message', message: m });
+          }
+        } else {
+          result.push({ kind: 'message', message: item.message });
+        }
+      } else {
+        result.push({ kind: 'event', event: item.event });
+      }
+    }
+    return result;
   }
 
   function eventLevelTone(level: string): string {
@@ -3489,7 +3592,7 @@
     const eventInput = runEventInputSummary(run);
     const firstSource = run.messages.length > 0 ? run.messages[0].source : '';
     const text = run.input || userMessage?.source || userMessage?.content || eventInput?.message || firstSource || '';
-    const sanitized = sanitizeTimelineSummary(text, 240);
+    const sanitized = sanitizeTimelineSummary(text, 120);
     if (sanitized) return sanitized;
     if (run.automationId) {
       return `任务：${taskNameForRun(run) || run.automationId}；触发规则：${runTriggerText(run)}`;
@@ -3503,7 +3606,7 @@
       return type === 'agent.user' || type.endsWith('.user') || type === 'user';
     });
     if (!event?.message) return null;
-    const message = sanitizeTimelineSummary(event.message, 240);
+    const message = sanitizeTimelineSummary(event.message, 120);
     return message ? { message, at: event.createdAt } : null;
   }
 
@@ -3515,7 +3618,7 @@
     if (artifactSummary && (!text.trim() || run.automationId || isPathLikeOutput(text))) {
       return artifactSummary;
     }
-    const sanitized = sanitizeTimelineSummary(text, 260);
+    const sanitized = sanitizeTimelineSummary(text, 130);
     if (sanitized) return sanitized;
     return artifactSummary;
   }
@@ -3544,6 +3647,13 @@
       .replace(/\s+Output:\s+.*$/i, '')
       .trim();
     return compactText(displayText || sanitized, maxLength);
+  }
+
+  function shortDate(value: string): string {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '--/--';
+    const pad = (part: number) => String(part).padStart(2, '0');
+    return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())}`;
   }
 
   function timelineDateKey(value: string): string {
@@ -3591,6 +3701,102 @@
 
   function buildGroupArtifacts(group: RunGroup): GroupTimelineItem[] {
     return buildGroupTimeline(group).filter((item) => item.kind === 'artifact');
+  }
+
+  function timelineNodeKey(node: RunTimelineNode): string {
+    if (node.kind === 'item') return node.item.id;
+    return `session-${node.sessionId}-${node.linkedAt}`;
+  }
+
+  function buildRunTimelineNodes(run: ProductRun, linkedSessions: Map<string, { sessionId: string; summary: string; status: string; messageCount: number }>): RunTimelineNode[] {
+    const nodes: RunTimelineNode[] = buildRunsTimeline([run])
+      .map((item) => ({ kind: 'item' as const, item }));
+
+    for (const [sessionId, session] of linkedSessions) {
+      const event = run.events.find((e) =>
+        (e as any).linkedSessionId === sessionId || (e as any).linkedAgentSessionId === sessionId);
+      const linkedAt = event?.createdAt || run.startedAt;
+      nodes.push({
+        kind: 'session_card',
+        sessionId,
+        linkedAt,
+        summary: session.summary,
+        status: session.status,
+        messageCount: session.messageCount,
+      });
+    }
+
+    return nodes.sort((a, b) => {
+      const atA = a.kind === 'item' ? a.item.at : a.linkedAt;
+      const atB = b.kind === 'item' ? b.item.at : b.linkedAt;
+      return new Date(atA || 0).getTime() - new Date(atB || 0).getTime();
+    });
+  }
+
+  async function loadRunTimelineDetail(run: ProductRun): Promise<void> {
+    expandedRunTimelineLoading = true;
+    expandedRunTimeline = [];
+
+    const rawEventsPromise = run.automationId
+      ? listAutomationEvents(run.automationId, 200).catch(() => [])
+      : Promise.resolve([]);
+    await loadRunDetail(run);
+    const updatedRun = runs.find((r) => r.id === run.id) || run;
+    const rawEvents = await rawEventsPromise;
+
+    // Show timeline immediately — linked sessions populate asynchronously
+    expandedRunTimeline = buildRunTimelineNodes(updatedRun, new Map());
+    expandedRunTimelineLoading = false;
+
+    // Load linked session cards in the background
+    if (updatedRun.automationId && rawEvents.length > 0) {
+      const sessionIds = new Set<string>();
+      for (const e of rawEvents) {
+        const sid = e.linkedSessionId || e.linkedAgentSessionId || '';
+        if (sid && !sessionIds.has(sid)) sessionIds.add(sid);
+      }
+      if (sessionIds.size > 0) {
+        await loadLinkedSessionsAndUpdateTimeline(updatedRun, Array.from(sessionIds));
+      }
+    }
+  }
+
+  async function loadLinkedSessionsAndUpdateTimeline(run: ProductRun, sessionIds: string[]): Promise<void> {
+    const linkedSessions = new Map<string, { sessionId: string; summary: string; status: string; messageCount: number }>();
+    const sessionData = await Promise.all(
+      sessionIds.map(async (sid) => {
+        try {
+          const [cells, events] = await Promise.all([
+            listWorkSessionCells(sid).catch(() => []),
+            listWorkSessionEvents(sid).catch(() => []),
+          ]);
+          const status = events.length > 0 ? '已停止' : '未知';
+          const firstSource = cells.find((c) => c.source?.trim())?.source?.trim() || '';
+          const summary = sanitizeTimelineSummary(firstSource, 180) || `会话 ${shortRunId(sid)}`;
+          return { sessionId: sid, summary, status, messageCount: cells.length };
+        } catch {
+          return { sessionId: sid, summary: `会话 ${shortRunId(sid)}`, status: '未知', messageCount: 0 };
+        }
+      }),
+    );
+    for (const sd of sessionData) {
+      linkedSessions.set(sd.sessionId, sd);
+    }
+    expandedRunTimeline = buildRunTimelineNodes(run, linkedSessions);
+  }
+
+  function openLinkedSession(sessionId: string): void {
+    workbenchMode = 'chat';
+    activeMode = workbenchMode;
+    selectedRunId = sessionId;
+    selectedConversationId = sessionId;
+    conversationId = sessionId;
+    selectedContextKey = `manual:${sessionId}`;
+    selectedTaskId = '';
+    taskFilter = '';
+    auxiliaryPanelKind = 'none';
+    sidePanelOpen = false;
+    updateURL();
   }
 
   function runTypeLabel(run: ProductRun): string {
@@ -3967,11 +4173,10 @@
           <div class="detail-tabs mode-tabs workbench-mode-tabs" role="tablist" aria-label="工作区模式">
             <button type="button" role="tab" aria-selected={workbenchMode === 'chat'} class:active={workbenchMode === 'chat'} disabled={recentManualConversationRuns.length === 0 && !selectedChatRun} on:click={() => setWorkbenchMode('chat')}>对话</button>
             <button type="button" role="tab" aria-selected={workbenchMode === 'tasks'} class:active={workbenchMode === 'tasks'} on:click={() => setWorkbenchMode('tasks')}>任务执行</button>
-            <button type="button" role="tab" aria-selected={workbenchMode === 'timeline'} class:active={workbenchMode === 'timeline'} on:click={() => setWorkbenchMode('timeline')}>活动记录</button>
           </div>
 
           <div class="workbench-content" class:panel-closed={!sidePanelOpen && workbenchMode !== 'chat' && workbenchMode !== 'tasks'} class:picker-mode={workbenchMode === 'chat' || workbenchMode === 'tasks'}>
-            <main class="workbench-main">
+            <main class="workbench-main" bind:this={workbenchMainEl}>
               {#if workbenchMode === 'chat'}
                 {#if selectedChatRun}
                   <section class="chat-workbench">
@@ -3989,25 +4194,47 @@
                     <div class="run-chat-pane">
                       <div class="message-stack chat-message-stack" bind:this={messageScroll}>
                         {#if detailLoading}<div class="alert info">正在加载对话...</div>{/if}
-                        {#if runMessages(selectedChatRun).length === 0}
+                        {#if chatTimelineItems.length === 0}
                           <div class="run-result-summary"><span class={`home-pill ${displayStatusClass(selectedChatRun)}`}>{displayStatus(selectedChatRun)}</span><h3>暂无消息</h3><p>{selectedChatRun.errorSummary || '消息流加载后会显示在这里。'}</p></div>
                         {:else}
-                          {#each runMessages(selectedChatRun) as message (message.renderKey || message.id || `${message.role}-${message.at}`)}
-                            <article class={`message-card role-${message.role} ${messageStatusTone(message)}`}>
-                              <div class="message-cell-head">
-                                <div class="message-cell-summary">
-                                  <div class="message-title-row">
-                                    <b>{formatRole(message.role)}</b>
-                                    <span class={`message-status ${messageStatusTone(message)}`}>{messageStatus(message)}</span>
-                                    <small>{formatTime(message.at)}</small>
+                          {#each chatTimelineItems as item (item.kind === 'message' ? (item.message.renderKey || item.message.id || `${item.message.role}-${item.message.at}`) : `event-${item.event.createdAt}-${item.event.type}`)}
+                            {#if item.kind === 'message'}
+                              {@const message = item.message}
+                              <article class={`message-card role-${message.role} ${messageStatusTone(message)}`}>
+                                <div class="message-cell-head">
+                                  <div class="message-cell-summary">
+                                    <div class="message-title-row">
+                                      <b>{formatRole(message.role)}</b>
+                                      <span class={`message-status ${messageStatusTone(message)}`}>{messageStatus(message)}</span>
+                                      <small>{formatTime(message.at)}</small>
+                                    </div>
+                                  </div>
+                                  {#if message.id}
+                                    <span class="message-cell-id">#{shortRunId(message.id)}</span>
+                                  {/if}
+                                </div>
+                                <pre class="message-source">{messageTerminalText(message) || message.source || '-'}</pre>
+                                {#if message.stopReason && (message.failed || message.success === false)}
+                                  <div class="message-stop-reason">
+                                    <span class="stop-reason-icon">&#9888;</span>
+                                    <span class="stop-reason-label">stopReason</span>
+                                    <span class="stop-reason-text">{message.stopReason}</span>
+                                  </div>
+                                {/if}
+                              </article>
+                            {:else}
+                              <article class="chat-event-inline event-{eventLevelTone(item.event.level)}">
+                                <div class="message-cell-head">
+                                  <div class="message-cell-summary">
+                                    <div class="message-title-row">
+                                      <b class="event-type-label">{formatEventType(item.event.type)}</b>
+                                      <small>{formatTime(item.event.createdAt)}</small>
+                                    </div>
                                   </div>
                                 </div>
-                                {#if message.id}
-                                  <button class="message-cell-id" type="button" title={message.id} on:click={(event) => copyText(message.id || '', event)}>#{shortRunId(message.id)}</button>
-                                {/if}
-                              </div>
-                              <pre class="message-source">{messageTerminalText(message) || message.source || '-'}</pre>
-                            </article>
+                                <pre class="message-source">{item.event.message}</pre>
+                              </article>
+                            {/if}
                           {/each}
                         {/if}
                       </div>
@@ -4030,6 +4257,7 @@
                 {/if}
               {:else if workbenchMode === 'tasks'}
                 <section class="workbench-section overall-timeline-panel">
+                  {#if !selectedRunId}
                   <div class="runs-filters timeline-filter-bar task-mode-filter-bar task-execution-filter-bar section-filter-row">
                     <input class="filter-keyword" value={timelineQuery} on:input={setTimelineQueryFromInput} placeholder="搜索任务、输入、输出、错误、产出物、短 ID" aria-label="任务执行关键词">
                     <select value={timelineTimeRange} on:change={setTimelineTimeRangeFromSelect} aria-label="时间范围">
@@ -4045,11 +4273,8 @@
                     </select>
                     <button type="button" class="icon-button" disabled={!timelineFiltersActive} on:click={clearTimelineFilters} title="清除筛选"><AntIcon definition={ClearOutlined} /></button>
                   </div>
+                  {/if}
 
-                  <div class="section-title-row">
-                    <h3>任务执行记录</h3>
-                    <span>{taskModeRunCards.length} 条</span>
-                  </div>
                   {#if groupDetailLoading}<div class="alert info">正在加载任务执行明细...</div>{/if}
                   {#if taskModeRunCards.length === 0}
                     <div class="empty-state compact-page-empty">
@@ -4058,18 +4283,144 @@
                       <p>清除关键词、时间、状态或任务筛选后再查看。</p>
                       <div class="empty-state-actions"><button type="button" on:click={clearTimelineFilters}>清除筛选</button></div>
                     </div>
+                  {:else if selectedRunId && selectedTaskCard}
+                    {@const card = selectedTaskCard}
+                    {@const detailRun = detailRunForCard(card)}
+                    <div class="task-detail-full-view">
+                      <button type="button" class={`timeline-run-card timeline-run-${card.kind} event-${statusClass(card.status)} selected`} aria-expanded="true" on:click={() => toggleTaskExecutionDetail(card.run)}>
+                        <div class="timeline-run-time">
+                          <div class="run-time-row">
+                            <time class="run-date">{shortDate(card.startedAt)}</time>
+                            <b>{timelineTime(card.startedAt)}</b>
+                          </div>
+                          <span class="run-time-arrow">&darr;</span>
+                          {#if card.endedAt && card.endedAt !== card.startedAt}
+                            <time class="run-date">{shortDate(card.endedAt)}</time>
+                            <b class="run-end-time">{timelineTime(card.endedAt)}</b>
+                          {:else}
+                            <b class="run-end-time running-label">进行中</b>
+                          {/if}
+                        </div>
+                        <div class="timeline-run-main">
+                          <div class="timeline-item-head">
+                            <b>{card.title} · #{shortRunId(card.id)}</b>
+                            <em>{card.status}</em>
+                          </div>
+                          {#if card.input}<p><span>输入：</span>{card.input}</p>{/if}
+                          {#if card.output}<p><span>输出：</span>{card.output}</p>{/if}
+                          {#if card.error || card.errorEventCount > 0}<p class="danger-text"><span>错误：</span>{card.error || `${card.errorEventCount} 个错误系统事件`}</p>{/if}
+                          <div class="timeline-run-actions">
+                            <span class="card-toggle-hint expanded-hint">▲ 点击收起</span>
+                          </div>
+                        </div>
+                      </button>
+                      <div class="task-execution-timeline task-execution-timeline-full">
+                        <div class="timeline-groups">
+                          <div class="timeline-list">
+                            <div class="timeline-item timeline-run">
+                              <time>{timelineTime(detailRun.startedAt)}</time>
+                              <div class="timeline-node">
+                                <div class="timeline-item-head">
+                                  <b>运行概览</b>
+                                  <em class="event-level-pill">{detailRun.status}</em>
+                                </div>
+                                <pre class="timeline-detail-text">运行类型：{runSourceText(detailRun)}
+自动化任务：{taskNameForRun(detailRun) || '-'}
+触发规则：{runTriggerText(detailRun)}
+开始时间：{formatTime(detailRun.startedAt)}
+结束时间：{formatTime(runEndedAt(detailRun))}
+运行耗时：{runDuration(detailRun)}
+运行状态：{detailRun.status}
+产出物：{detailRun.artifacts.length} 个
+错误信息：{detailRun.errorSummary || '-'}
+运行 ID：{detailRun.id}</pre>
+                              </div>
+                            </div>
+                            {#if expandedRunTimelineLoading}<div class="alert info">正在加载运行详情...</div>{/if}
+                            {#if expandedRunTimeline.length > 0}
+                              {#each expandedRunTimeline as node (timelineNodeKey(node))}
+                                {#if node.kind === 'item'}
+                                  {@const item = node.item}
+                                  <div class="timeline-item timeline-{item.kind} timeline-{item.level}">
+                                    <time>{timelineTime(item.at)}</time>
+                                    <div class="timeline-node">
+                                      <div class="timeline-item-head">
+                                        <b>{timelineKindLabel(item.kind)}</b>
+                                        {#if item.level && item.level !== 'info'}
+                                          <em class="event-level-pill">{item.level}</em>
+                                        {/if}
+                                      </div>
+                                      {#if item.detail}
+                                        <pre class="timeline-detail-text">{item.detail}</pre>
+                                      {/if}
+                                    </div>
+                                  </div>
+                                {:else if node.kind === 'session_card'}
+                                  <div class="timeline-item timeline-session">
+                                    <time>{timelineTime(node.linkedAt)}</time>
+                                    <div class="timeline-node">
+                                      <div class="timeline-item-head">
+                                        <b>关联会话</b>
+                                      </div>
+                                      <p>{node.summary}</p>
+                                      <div class="timeline-source-row">
+                                        <span>{node.status} · {node.messageCount} 条消息</span>
+                                        <button class="link-button" on:click|stopPropagation={() => openLinkedSession(node.sessionId)}>查看会话</button>
+                                      </div>
+                                    </div>
+                                  </div>
+                                {/if}
+                              {/each}
+                            {:else if !expandedRunTimelineLoading}
+                              {@const events = sortedRunEvents(detailRun)}
+                              {#each events as event, index (`${event.createdAt}-${event.type}-${index}`)}
+                                <div class="timeline-item timeline-system timeline-{eventLevelTone(event.level)}">
+                                  <time>{timelineTime(event.createdAt)}</time>
+                                  <div class="timeline-node">
+                                    <div class="timeline-item-head">
+                                      <b>{timelineKindLabel('system')}</b>
+                                      {#if event.level && event.level !== 'info'}
+                                        <em class="event-level-pill">{event.level}</em>
+                                      {/if}
+                                      <em class="event-level-pill" style="background: var(--bg); color: var(--text);">{event.type}</em>
+                                    </div>
+                                    <pre class="timeline-detail-text">level: {event.level || 'info'}
+type: {event.type}
+message: {event.message}
+time: {formatTime(event.createdAt)}</pre>
+                                  </div>
+                                </div>
+                              {/each}
+                              {#if events.length === 0}
+                                <div class="empty compact-empty">暂无日志记录。</div>
+                              {/if}
+                            {/if}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
                   {:else}
+                    <div class="timeline-list-scroll" bind:this={timelineListScrollEl}>
                     <div class="aggregate-timeline-groups">
                       {#each taskModeDateGroups as group (group.key)}
                         <section class="timeline-day">
-                          <h3>{group.label}</h3>
+                          <h3 class="day-group-head"><span>{selectedAutomationTaskItem?.title || '任务'} <span class="pipe">|</span> {group.label} <span class="pipe">|</span> {group.items.length} 条</span></h3>
                           <div class="aggregate-timeline-list">
                             {#each group.items as card (card.id)}
                               <div class="task-execution-card-frame">
-                                <button type="button" class={`timeline-run-card timeline-run-${card.kind} event-${statusClass(card.status)}`} class:selected={selectedRunId === card.id} aria-expanded={selectedRunId === card.id} on:click={() => toggleTaskExecutionDetail(card.run)}>
+                                <button type="button" class={`timeline-run-card timeline-run-${card.kind} event-${statusClass(card.status)}`} aria-expanded="false" on:click={() => toggleTaskExecutionDetail(card.run)}>
                                   <div class="timeline-run-time">
-                                    <b>{timelineCardTimeRange(card)}</b>
-                                    <span>#{shortRunId(card.id)}</span>
+                                    <div class="run-time-row">
+                                      <time class="run-date">{shortDate(card.startedAt)}</time>
+                                      <b>{timelineTime(card.startedAt)}</b>
+                                    </div>
+                                    <span class="run-time-arrow">&darr;</span>
+                                    {#if card.endedAt && card.endedAt !== card.startedAt}
+                                      <time class="run-date">{shortDate(card.endedAt)}</time>
+                                      <b class="run-end-time">{timelineTime(card.endedAt)}</b>
+                                    {:else}
+                                      <b class="run-end-time running-label">进行中</b>
+                                    {/if}
                                   </div>
                                   <div class="timeline-run-main">
                                     <div class="timeline-item-head">
@@ -4078,62 +4429,12 @@
                                     </div>
                                     {#if card.input}<p><span>输入：</span>{card.input}</p>{/if}
                                     {#if card.output}<p><span>输出：</span>{card.output}</p>{/if}
-                                    {#if card.artifactCount > 0}<p><span>产出物：</span>{card.artifactCount} 个</p>{/if}
                                     {#if card.error || card.errorEventCount > 0}<p class="danger-text"><span>错误：</span>{card.error || `${card.errorEventCount} 个错误系统事件`}</p>{/if}
                                     <div class="timeline-run-actions">
-                                      <span class="card-toggle-hint">{selectedRunId === card.id ? '点击卡片收起详情' : '点击卡片查看详情'}</span>
+                                      <span class="card-toggle-hint">点击卡片查看详情</span>
                                     </div>
                                   </div>
                                 </button>
-                                {#if selectedRunId === card.id}
-                                  {@const detailRun = detailRunForCard(card)}
-                                  <div class="task-execution-detail">
-                                    {#if detailLoading}<div class="alert info">正在加载运行详情...</div>{/if}
-                                    <div class="execution-detail-section">
-                                      <div class="section-title-row">
-                                        <h3>系统日志</h3>
-                                        <span>{sortedRunEvents(detailRun).length} 条</span>
-                                      </div>
-                                      {#if sortedRunEvents(detailRun).length === 0}
-                                        <div class="empty compact-empty">暂无系统日志。</div>
-                                      {:else}
-                                        <div class="event-list task-execution-log-list">
-                                          {#each sortedRunEvents(detailRun) as event, index (`${event.createdAt}-${event.type}-${index}`)}
-                                            <div class={`list-item event-item event-${eventLevelTone(event.level)}`}>
-                                              <span>
-                                                <b><span>{event.type}</span><em class="event-level-pill">{event.level || 'info'}</em></b>
-                                                <small>{event.message} · {formatTime(event.createdAt)}</small>
-                                              </span>
-                                            </div>
-                                          {/each}
-                                        </div>
-                                      {/if}
-                                    </div>
-                                    <div class="execution-detail-section">
-                                      <div class="section-title-row">
-                                        <h3>运行信息</h3>
-                                        <span title={detailRun.id}>#{shortRunId(detailRun.id)}</span>
-                                      </div>
-                                      <div class="side-facts wide-facts execution-detail-facts">
-                                        <div><span>运行类型</span><b>{runSourceText(detailRun)}</b></div>
-                                        <div><span>自动化任务</span><b>{taskNameForRun(detailRun) || '-'}</b></div>
-                                        <div><span>触发规则</span><b>{runTriggerText(detailRun)}</b></div>
-                                        <div><span>开始时间</span><b>{formatTime(detailRun.startedAt)}</b></div>
-                                        <div><span>结束时间</span><b>{formatTime(runEndedAt(detailRun))}</b></div>
-                                        <div><span>运行耗时</span><b>{runDuration(detailRun)}</b></div>
-                                        <div><span>运行状态</span><b>{detailRun.status}</b></div>
-                                        <div><span>产出物</span><b>{detailRun.artifacts.length} 个</b></div>
-                                        <div><span>错误信息</span><b>{detailRun.errorSummary || '-'}</b></div>
-                                        <div><span>运行 ID</span><b title={detailRun.id}>{detailRun.id}</b></div>
-                                      </div>
-                                      {#if detailRun.automationId}
-                                        <div class="timeline-run-actions">
-                                          <button type="button" disabled={isRunTaskDeleted(detailRun)} on:click|stopPropagation={() => goTaskDetail(detailRun)}>{isRunTaskDeleted(detailRun) ? '任务已删除' : '查看任务配置'}</button>
-                                        </div>
-                                      {/if}
-                                    </div>
-                                  </div>
-                                {/if}
                               </div>
                             {/each}
                           </div>
@@ -4145,156 +4446,7 @@
                     {:else}
                       <div class="timeline-end-note">已显示最近 {visibleTaskModeRunCards.length} 条任务执行。</div>
                     {/if}
-                  {/if}
-                </section>
-              {:else}
-                <section class="workbench-section overall-timeline-panel">
-                  <div class="runs-filters timeline-filter-bar section-filter-row">
-                    <input class="filter-keyword" value={timelineQuery} on:input={setTimelineQueryFromInput} placeholder="搜索输入、输出、错误、任务、产出物、短 ID" aria-label="时间线关键词">
-                    <select value={timelineTimeRange} on:change={setTimelineTimeRangeFromSelect} aria-label="时间范围">
-                      <option value="all">全部时间</option>
-                      <option value="today">今天</option>
-                      <option value="7d">近 7 天</option>
-                      <option value="30d">近 30 天</option>
-                    </select>
-                    <select value={timelineStatus} on:change={setTimelineStatusFromSelect} aria-label="运行状态">
-                      {#each statusOptionsForTab('all') as option}
-                        <option value={option.value}>{option.label}</option>
-                      {/each}
-                    </select>
-                    <select value={timelineFilter} on:change={setTimelineFilterFromSelect} aria-label="类型筛选">
-                      <option value="all">全部类型</option>
-                      {#each timelineFilterOptions().filter(o => o.value !== 'all') as option}
-                        <option value={option.value}>{option.label}</option>
-                      {/each}
-                    </select>
-                    <select value={selectedTaskId} on:change={setTimelineTaskFromSelect} aria-label="任务筛选">
-                      <option value="">全部任务</option>
-                      {#each timelineTaskFilterOptions() as item (item.key)}
-                        <option value={item.taskId}>{item.deletedTask ? `已删除任务：${item.title}` : item.title}</option>
-                      {/each}
-                    </select>
-                    <button type="button" class="icon-button" disabled={!timelineFiltersActive} on:click={clearTimelineFilters} title="清除筛选"><AntIcon definition={ClearOutlined} /></button>
-                  </div>
-                  {#if timelineQuery.trim() && timelineSearchMatches.length > 0}
-                    <div class="timeline-quick-row">
-                      <span>{timelineSearchMatches.length} 条匹配记录</span>
-                      <button type="button" on:click={() => selectSearchMatch('previous')}>上一个</button>
-                      <button type="button" on:click={() => selectSearchMatch('next')}>下一个</button>
                     </div>
-                  {/if}
-
-                  <div class="section-title-row">
-                    <h3>活动记录</h3>
-                    <span>{filteredTimelineRunCards.length} 条</span>
-                  </div>
-                  {#if groupDetailLoading}<div class="alert info">正在加载时间线明细...</div>{/if}
-                  {#if selectedAgentObservation.totalCount === 0 && currentAgentTasks.length === 0}
-                    <div class="empty-state compact-page-empty">
-                      <div class="empty-state-icon"><AntIcon definition={InboxOutlined} /></div>
-                      <h3>该智能体还没有运行记录</h3>
-                      <p>可从智能体页运行，或创建绑定该智能体的自动化任务。</p>
-                    </div>
-                  {:else if filteredTimelineRunCards.length === 0}
-                    <div class="empty-state compact-page-empty">
-                      <div class="empty-state-icon"><AntIcon definition={FilterOutlined} /></div>
-                      <h3>当前筛选无结果</h3>
-                      <p>清除关键词、时间、类型、状态或任务筛选后再查看。</p>
-                      <div class="empty-state-actions"><button type="button" on:click={clearTimelineFilters}>清除筛选</button></div>
-                    </div>
-                  {:else}
-                    <div class="aggregate-timeline-groups">
-                      {#each timelineRunDateGroups as group (group.key)}
-                        <section class="timeline-day">
-                          <h3>{group.label}</h3>
-                          <div class="aggregate-timeline-list">
-                            {#each group.items as card (card.id)}
-                              <div class="task-execution-card-frame">
-                                <button type="button" class={`timeline-run-card timeline-run-${card.kind} event-${statusClass(card.status)}`} class:selected={selectedRunId === card.id} aria-expanded={selectedRunId === card.id} on:click={() => toggleActivityDetail(card.run)}>
-                                  <div class="timeline-run-time">
-                                    <b>{timelineCardTimeRange(card)}</b>
-                                    <span>#{shortRunId(card.id)}</span>
-                                  </div>
-                                  <div class="timeline-run-main">
-                                    <div class="timeline-item-head">
-                                      <b>{timelineCardSummaryLine(card)}</b>
-                                      <em>{card.status}</em>
-                                    </div>
-                                    <p><span>{card.kind === 'manual' ? '对话' : '任务'}：</span>{card.title}</p>
-                                    {#if shouldShowTimelineField(timelineFilter, 'input') && card.input}<p class:highlighted={timelineFilter === 'io'}><span>输入：</span>{card.input}</p>{/if}
-                                    {#if shouldShowTimelineField(timelineFilter, 'output') && card.output}<p class:highlighted={timelineFilter === 'io'}><span>输出：</span>{card.output}</p>{/if}
-                                    {#if shouldShowTimelineField(timelineFilter, 'artifact') && card.artifactCount > 0}<p class:highlighted={timelineFilter === 'artifact'}><span>产出物：</span>{card.artifactCount} 个</p>{/if}
-                                    {#if shouldShowTimelineField(timelineFilter, 'error') && (card.error || card.errorEventCount > 0)}<p class="danger-text" class:highlighted={timelineFilter === 'error'}><span>错误：</span>{card.error || `${card.errorEventCount} 个错误系统事件`}</p>{/if}
-                                    <div class="timeline-run-actions">
-                                      <span class="card-toggle-hint">{selectedRunId === card.id ? '点击卡片收起详情' : '点击卡片查看详情'}</span>
-                                    </div>
-                                  </div>
-                                </button>
-                                {#if selectedRunId === card.id}
-                                  {@const detailRun = detailRunForCard(card)}
-                                  <div class="task-execution-detail">
-                                    {#if detailLoading}<div class="alert info">正在加载运行详情...</div>{/if}
-                                    <div class="execution-detail-section">
-                                      <div class="section-title-row">
-                                        <h3>系统日志</h3>
-                                        <span>{sortedRunEvents(detailRun).length} 条</span>
-                                      </div>
-                                      {#if sortedRunEvents(detailRun).length === 0}
-                                        <div class="empty compact-empty">暂无系统日志。</div>
-                                      {:else}
-                                        <div class="event-list task-execution-log-list">
-                                          {#each sortedRunEvents(detailRun) as event, index (`${event.createdAt}-${event.type}-${index}`)}
-                                            <div class={`list-item event-item event-${eventLevelTone(event.level)}`}>
-                                              <span>
-                                                <b><span>{event.type}</span><em class="event-level-pill">{event.level || 'info'}</em></b>
-                                                <small>{event.message} · {formatTime(event.createdAt)}</small>
-                                              </span>
-                                            </div>
-                                          {/each}
-                                        </div>
-                                      {/if}
-                                    </div>
-                                    <div class="execution-detail-section">
-                                      <div class="section-title-row">
-                                        <h3>运行信息</h3>
-                                        <span title={detailRun.id}>#{shortRunId(detailRun.id)}</span>
-                                      </div>
-                                      <div class="side-facts wide-facts execution-detail-facts">
-                                        <div><span>运行类型</span><b>{runSourceText(detailRun)}</b></div>
-                                        <div><span>自动化任务</span><b>{taskNameForRun(detailRun) || '-'}</b></div>
-                                        <div><span>触发规则</span><b>{runTriggerText(detailRun)}</b></div>
-                                        <div><span>开始时间</span><b>{formatTime(detailRun.startedAt)}</b></div>
-                                        <div><span>结束时间</span><b>{formatTime(runEndedAt(detailRun))}</b></div>
-                                        <div><span>运行耗时</span><b>{runDuration(detailRun)}</b></div>
-                                        <div><span>运行状态</span><b>{detailRun.status}</b></div>
-                                        <div><span>产出物</span><b>{detailRun.artifacts.length} 个</b></div>
-                                        <div><span>错误信息</span><b>{detailRun.errorSummary || '-'}</b></div>
-                                        <div><span>运行 ID</span><b title={detailRun.id}>{detailRun.id}</b></div>
-                                      </div>
-                                      {#if detailRun.automationId}
-                                        <div class="timeline-run-actions">
-                                          <button type="button" disabled={isRunTaskDeleted(detailRun)} on:click|stopPropagation={() => goTaskDetail(detailRun)}>{isRunTaskDeleted(detailRun) ? '任务已删除' : '查看任务配置'}</button>
-                                        </div>
-                                      {:else if canContinueManualConversation(detailRun)}
-                                        <div class="timeline-run-actions">
-                                          <button type="button" disabled={!canOpenDebug(detailRun)} on:click|stopPropagation={() => openDebugRun(detailRun)}>调试终端</button>
-                                          <button type="button" on:click|stopPropagation={() => continueManualConversation(detailRun)}>继续对话</button>
-                                        </div>
-                                      {/if}
-                                    </div>
-                                  </div>
-                                {/if}
-                              </div>
-                            {/each}
-                          </div>
-                        </section>
-                      {/each}
-                    </div>
-                    {#if filteredTimelineRunCards.length > visibleTimelineRunCards.length}
-                      <button class="load-more-button" on:click={() => timelineVisibleLimit += 100}>加载更多</button>
-                    {:else}
-                      <div class="timeline-end-note">已显示最近 {visibleTimelineRunCards.length} 条活动记录。</div>
-                    {/if}
                   {/if}
                 </section>
               {/if}
@@ -4348,6 +4500,9 @@
                           <span class="run-card-error">失败 {item.failedCount} 次</span>
                         {:else}
                           <span class="run-card-time">{item.deletedTask ? '已删除任务' : item.nextTriggerAt ? `下一次触发 ${formatTime(item.nextTriggerAt)}` : '暂无下一次触发'}</span>
+                        {/if}
+                        {#if !item.deletedTask}
+                          <a class="task-config-link-inline" href={appPath(`/automation-tasks?task=${encodeURIComponent(item.taskId)}`)} on:click|stopPropagation={() => {}}>查看任务配置</a>
                         {/if}
                       </button>
                     {/each}

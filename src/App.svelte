@@ -18,14 +18,20 @@
   import AutomationTasksPage from './pages/AutomationTasksPage.svelte';
   import SettingsPage from './pages/SettingsPage.svelte';
   import DebugRunPage from './pages/DebugRunPage.svelte';
+  import RunDetailPage from './pages/RunDetailPage.svelte';
+
   import EventDetailPage from './pages/EventDetailPage.svelte';
   import LoginPage from './pages/LoginPage.svelte';
   import { stripAppBase, appPath } from './paths';
 
-  type Page = 'runs' | 'agents' | 'automation-tasks' | 'settings' | 'debug-run' | 'event-detail' | 'login';
+  type Page = 'runs' | 'agents' | 'automation-tasks' | 'settings' | 'debug-run' | 'event-detail' | 'login' | 'run-detail';
 
   let debugRunId = '';
+
   let eventDetailId = '';
+  let runDetailId = '';
+  let runDetailLoaderId = '';
+  let runDetailType = '';
   let activePage: Page = pageFromPath(typeof window === 'undefined' ? '/' : stripAppBase(window.location.pathname));
   let health: HealthStatus | null = null;
   let statusError = '';
@@ -50,7 +56,9 @@
     'automation-tasks': appPath('/automation-tasks'),
     settings: appPath('/settings'),
     'debug-run': appPath('/debug/runs'),
+
     'event-detail': appPath('/events'),
+    'run-detail': appPath('/runs'),
     login: appPath('/login'),
   };
 
@@ -61,10 +69,19 @@
       debugRunId = decodeURIComponent(debugMatch[1]);
       return 'debug-run';
     }
+
     const eventDetailMatch = normalized.match(/^\/events\/([^/]+)$/);
     if (eventDetailMatch) {
       eventDetailId = decodeURIComponent(eventDetailMatch[1]);
       return 'event-detail';
+    }
+    const runDetailMatch = normalized.match(/^\/runs\/([^/]+)$/);
+    if (runDetailMatch) {
+      runDetailId = decodeURIComponent(runDetailMatch[1]);
+      const params = new URLSearchParams(window.location.search);
+      runDetailLoaderId = params.get('loaderId') || '';
+      runDetailType = params.get('type') || '';
+      return 'run-detail';
     }
     if (normalized === '/login') {
       return 'login';
@@ -131,6 +148,23 @@
     const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
     if (current !== nextPath) {
       history.pushState({ page: 'debug-run', runId }, '', nextPath);
+    }
+  }
+
+
+  function navigateToRunDetail(runId: string, loaderId: string, runType: string): void {
+    runDetailId = runId;
+    runDetailLoaderId = loaderId;
+    runDetailType = runType;
+    activePage = 'run-detail';
+    const params = new URLSearchParams();
+    if (loaderId) params.set('loaderId', loaderId);
+    if (runType) params.set('type', runType);
+    const qs = params.toString();
+    const nextPath = appPath(`/runs/${encodeURIComponent(runId)}${qs ? `?${qs}` : ''}`);
+    const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (current !== nextPath) {
+      history.pushState({ page: 'run-detail', runId, loaderId, runType }, '', nextPath);
     }
   }
 
@@ -493,13 +527,17 @@
     </header>
     <section class="content">
       {#if activePage === 'runs'}
-        <RunsPage on:debug={(event) => navigateToDebug(event.detail)} />
+        <RunsPage on:debug={(event) => navigateToDebug(event.detail)} on:viewRunDetail={(event) => navigateToRunDetail(event.detail.runId, event.detail.loaderId, event.detail.runType)} />
       {:else if activePage === 'agents'}
         <AgentsPage />
       {:else if activePage === 'automation-tasks'}
         <AutomationTasksPage />
       {:else if activePage === 'settings'}
         <SettingsPage />
+      {:else if activePage === 'run-detail'}
+        <RunDetailPage runId={runDetailId} loaderId={runDetailLoaderId} runType={runDetailType} on:navigateRuns={(event) => navigateRunsWithRun(event.detail)} />
+      {:else if activePage === 'debug-run'}
+        <DebugRunPage runId={debugRunId} on:navigateRuns={(event) => navigateRunsWithRun(event.detail)} />
       {:else}
         <DebugRunPage runId={debugRunId} on:navigateRuns={(event) => navigateRunsWithRun(event.detail)} />
       {/if}

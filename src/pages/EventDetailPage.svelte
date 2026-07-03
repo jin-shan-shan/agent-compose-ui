@@ -294,7 +294,18 @@
 
   function stripAgentResultPayload(text: string): string {
     const index = text.lastIndexOf(AGENT_RESULT_PREFIX);
-    return index >= 0 ? text.slice(0, index) : text;
+    if (index < 0) return text;
+    const jsonStart = text.indexOf('{', index);
+    if (jsonStart < 0) return text.slice(0, index);
+    try {
+      const jsonEnd = text.lastIndexOf('}') + 1;
+      const payload = JSON.parse(text.slice(jsonStart, jsonEnd));
+      const extracted = payload.finalText || payload.final_text || payload.transcript || payload.stderr || '';
+      const before = text.slice(0, index);
+      return (before ? before + '\n' : '') + extracted;
+    } catch {
+      return text.slice(0, index);
+    }
   }
 
   function latestCellAgent(trace: SessionTrace): string {
