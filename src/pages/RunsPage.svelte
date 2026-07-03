@@ -3851,40 +3851,103 @@
 
   async function watchRunLoop(runId: string, controller: AbortController): Promise<void> {
     let retryDelay = 1000;
+    let batchPending = false;
+    let batchedCells: Array<Awaited<ReturnType<typeof listWorkSessionCells>>[number]> = [];
+    let batchedChunks: Array<{cellId: string; chunk: string}> = [];
+    let batchedSession: Awaited<ReturnType<typeof getWorkSessionStatus>> | null = null;
+    let batchedEvents: Array<{type: string; level: string; message: string; createdAt: string}> = [];
+
+    function flushBatch(): void {
+      if (!batchPending) return;
+      batchPending = false;
+      const hasChanges = batchedChunks.length > 0 || batchedCells.length > 0 || batchedEvents.length > 0 || batchedSession;
+      if (!hasChanges) return;
+      const cells = batchedCells;
+      const chunks = batchedChunks;
+      const events = batchedEvents;
+      const session = batchedSession;
+      batchedCells = [];
+      batchedChunks = [];
+      batchedEvents = [];
+      batchedSession = null;
+      runs = runs.map((item) => {
+        if (item.id !== runId) return item;
+        let messages = item.messages;
+        let itemEvents = item.events;
+
+        for (const { cellId, chunk } of chunks) {
+          const applied = appendAgentChunkToMessages(messages, cellId, chunk);
+          if (!applied) appendPendingChunk(cellId, chunk);
+        }
+
+        for (const cell of cells) {
+          for (const msg of cellToMessages(cell)) {
+            if (msg.role === 'user' && messages.some((m) => m.role === 'user' && (m.source || m.content || '') === (msg.source || msg.content || ''))) {
+              continue;
+            }
+            messages = upsertMessage(messages, applyPendingChunks(msg));
+          }
+          if (cell.agent && !cell.running) {
+            sendingMessage = false;
+          }
+        }
+
+        if (events.length > 0) {
+          itemEvents = [...itemEvents, ...events];
+        }
+
+        let result = { ...item, messages };
+        if (events.length > 0) result = { ...result, events: itemEvents };
+        if (session) result = mergeSessionUpdate(result, sessionToRun(session));
+        return result;
+      });
+      if (cells.some((c) => c.agent) || chunks.length > 0) {
+        void scrollMessagesToBottom();
+      }
+    }
+
+    function appendAgentChunkToMessages(messages: ProductRun['messages'], cellId: string, chunk: string): boolean {
+      let index = cellId ? messages.findIndex((message) => message.id === cellId) : -1;
+      if (index < 0) index = messages.findIndex((message) => message.role === 'agent' && message.running);
+      if (index >= 0 && messages[index].role === 'agent') {
+        messages[index] = { ...messages[index], content: stripAgentResultPayload(`${messages[index].content || ''}${chunk}`) };
+        return true;
+      }
+      return false;
+    }
+
+    const schedule = () => {
+      if (!batchPending) { batchPending = true; void tick().then(flushBatch); }
+    };
+
     while (!controller.signal.aborted) {
       try {
         await watchWorkSession(runId, (event) => {
+          retryDelay = 1000;
           if (event.type === 'session') {
-            retryDelay = 1000;
-            runs = sortRunsByUpdatedTime(runs.map((item) => item.id === runId ? mergeSessionUpdate(item, sessionToRun(event.session)) : item));
+            batchedSession = event.session;
+            schedule();
           } else if (event.type === 'event') {
-            runs = runs.map((item) => item.id === runId
-              ? { ...item, events: [...item.events, { type: event.event.type, level: event.event.level, message: event.event.message, createdAt: event.event.createdAt }] }
-              : item);
+            batchedEvents.push({ type: event.event.type, level: event.event.level, message: event.event.message, createdAt: event.event.createdAt });
+            schedule();
           } else if (event.type === 'cell') {
-            runs = runs.map((item) => {
-              if (item.id !== runId) return item;
-              let messages = item.messages;
-              for (const msg of cellToMessages(event.cell)) {
-                if (msg.role === 'user' && messages.some((m) => m.role === 'user' && (m.source || m.content || '') === (msg.source || msg.content || ''))) {
-                  continue;
-                }
-                messages = upsertMessage(messages, applyPendingChunks(msg));
+            if (!event.cell.running) {
+              const existingMsg = runs.find((r) => r.id === runId)?.messages.find((m) => m.id === event.cell.id);
+              if (existingMsg && !existingMsg.running && existingMsg.content === stripAgentResultPayload(event.cell.output || event.cell.stopReason || '')) {
+                return; // already have this cell, skip
               }
-              return { ...item, messages };
-            });
-            if (event.cell.agent && !event.cell.running) {
-              sendingMessage = false;
             }
-            void scrollMessagesToBottom();
+            batchedCells.push(event.cell);
+            schedule();
           } else if (event.type === 'chunk') {
-            const applied = appendAgentChunk(runId, event.cellId, event.chunk);
-            if (!applied) {
-              appendPendingChunk(event.cellId, event.chunk);
-            }
-            void scrollMessagesToBottom();
+            batchedChunks.push({ cellId: event.cellId, chunk: event.chunk });
+            schedule();
           }
         }, controller.signal);
+        flushBatch();
+        // Check if session is still running — if not, no need to reconnect
+        const currentRun = runs.find((r) => r.id === runId);
+        if (!currentRun || currentRun.rawStatus !== 'RUNNING') break;
       } catch (err) {
         if (!controller.signal.aborted) {
           error = err instanceof Error ? err.message : String(err);
